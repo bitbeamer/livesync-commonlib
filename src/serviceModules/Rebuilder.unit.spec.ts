@@ -36,6 +36,11 @@ function createRebuilder() {
         allDocs: vi.fn(async () => ({ total_rows: 1 })),
     };
     const activityFinished = vi.fn();
+    const activeReplicator = {
+        getReplicationPBKDF2Salt: vi.fn(async () => "salt"),
+        tryResetRemoteDatabase: vi.fn(async () => undefined),
+        initializeDatabaseForReplication: vi.fn(async () => true),
+    };
     const runBoundedRemoteActivity = vi.fn(async (task: () => unknown) => {
         try {
             return await task();
@@ -79,10 +84,7 @@ function createRebuilder() {
             initialiseDatabase: vi.fn(async () => undefined),
         },
         replicator: {
-            getActiveReplicator: vi.fn(() => ({
-                getReplicationPBKDF2Salt: vi.fn(async () => "salt"),
-                tryResetRemoteDatabase: vi.fn(async () => undefined),
-            })),
+            getActiveReplicator: vi.fn(() => activeReplicator),
             getNewReplicator: vi.fn(),
             runBoundedRemoteActivity,
         },
@@ -118,6 +120,7 @@ function createRebuilder() {
         rebuilder: new ServiceRebuilder(services as any),
         services,
         settings,
+        activeReplicator,
         activityFinished,
         runBoundedRemoteActivity,
     };
@@ -157,6 +160,18 @@ describe("ServiceRebuilder fast fetch retry", () => {
         );
         expect(services.setting.deleteSmallConfig.mock.invocationCallOrder[0]).toBeLessThan(
             activityFinished.mock.invocationCallOrder[0]
+        );
+    });
+
+    it("refreshes the device identity before accepting it after fast fetch", async () => {
+        fetchChangesForInitialSyncMock.mockReset().mockResolvedValue(undefined);
+        const { rebuilder, services, activeReplicator } = createRebuilder();
+
+        await rebuilder.$fetchLocalDBFast(false);
+
+        expect(activeReplicator.initializeDatabaseForReplication).toHaveBeenCalledOnce();
+        expect(activeReplicator.initializeDatabaseForReplication.mock.invocationCallOrder[0]).toBeLessThan(
+            services.replication.markResolved.mock.invocationCallOrder[0]
         );
     });
 });

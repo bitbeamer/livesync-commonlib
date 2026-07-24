@@ -84,6 +84,13 @@ export class ServiceRebuilder extends ServiceModuleBase<ServiceRebuilderDependen
         services.setting.suspendAllSync.addHandler(this._allSuspendAllSync.bind(this));
     }
 
+    private async refreshDeviceIdentityAfterDatabaseReplacement(): Promise<void> {
+        const activeReplicator = this.replicator.getActiveReplicator();
+        if (!activeReplicator || !(await activeReplicator.initializeDatabaseForReplication())) {
+            throw new Error("Could not initialise the device identity after replacing the local database");
+        }
+    }
+
     async $performRebuildDB(
         method: "localOnly" | "remoteOnly" | "rebuildBothByThisDevice" | "localOnlyWithChunks"
     ): Promise<void> {
@@ -339,6 +346,7 @@ Are you sure you wish to proceed?`;
         } else {
             // Do not create local file entries before sync (Means use remote information)
         }
+        await this.refreshDeviceIdentityAfterDatabaseReplacement();
         await this.replication.markResolved();
         await delay(500);
         await this.replication.replicateAllFromRemote(true);
@@ -467,6 +475,7 @@ Are you sure you wish to proceed?`;
             "fetch-init-complete"
         );
 
+        await this.refreshDeviceIdentityAfterDatabaseReplacement();
         await this.replication.markResolved();
         if (autoResume) {
             await this.resumeReflectingDatabase(true);
