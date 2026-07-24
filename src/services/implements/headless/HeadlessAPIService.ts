@@ -6,6 +6,7 @@ import type { Confirm } from "@lib/interfaces/Confirm";
 // const module = await import("node:crypto");
 import module from "node:crypto";
 import { _activeDocument } from "@lib/common/coreEnvFunctions.ts";
+import { fetch as pouchDBFetch } from "pouchdb-fetch";
 
 declare const MANIFEST_VERSION: string | undefined;
 // declare const PACKAGE_VERSION: string | undefined;
@@ -162,7 +163,14 @@ export class HeadlessAPIService<T extends ServiceContext> extends InjectableAPIS
     override get isOnline(): boolean {
         return true;
     }
+    override webCompatFetch(req: string | Request, opts?: RequestInit): Promise<Response> {
+        // PouchDB's HTTP adapter is tested on Node with pouchdb-fetch
+        // (node-fetch plus cookie handling). Node's global fetch uses Undici,
+        // whose long-poll response behaviour differs from the browser transport
+        // used by Obsidian and can leave a live _changes request asleep.
+        return pouchDBFetch(req as never, opts as never) as unknown as Promise<Response>;
+    }
     override nativeFetch(req: string | Request, opts?: RequestInit): Promise<Response> {
-        return fetch(req, opts);
+        return this.webCompatFetch(req, opts);
     }
 }
