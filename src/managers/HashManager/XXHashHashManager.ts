@@ -4,6 +4,22 @@ import type { XXHashAPI } from "xxhash-wasm-102";
 import { HashAlgorithms } from "@lib/common/models/setting.const.ts";
 import type { HashAlgorithm } from "@lib/common/models/setting.type.ts";
 
+let sharedXXHash: Promise<XXHashAPI> | undefined;
+
+function getSharedXXHash(): Promise<XXHashAPI> {
+    if (sharedXXHash) {
+        return sharedXXHash;
+    }
+    const initialisation = xxhashNew().catch((error: unknown) => {
+        if (sharedXXHash === initialisation) {
+            sharedXXHash = undefined;
+        }
+        throw error;
+    });
+    sharedXXHash = initialisation;
+    return initialisation;
+}
+
 /**
  * Abstract base class for hash managers using XXHash algorithms.
  * Provides initialisation and common properties for XXHash-based managers.
@@ -27,7 +43,7 @@ export abstract class XXHashHashManager extends HashManagerCore {
      * @returns A promise resolving to true when initialisation is complete.
      */
     async processInitialise(): Promise<boolean> {
-        this.xxhash = await xxhashNew();
+        this.xxhash = await getSharedXXHash();
         return true;
     }
 }

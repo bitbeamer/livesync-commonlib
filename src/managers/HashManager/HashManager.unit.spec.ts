@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { HashManager } from "./HashManager.ts";
 import { DEFAULT_SETTINGS, HashAlgorithms, type HashAlgorithm, type RemoteDBSettings } from "@lib/common/types.ts";
 import { HashEncryptedPrefix } from "./HashManagerCore.ts";
+import { XXHashHashManager } from "./XXHashHashManager.ts";
 import type { SettingService } from "@lib/services/base/SettingService.ts";
 
 const generateSettings = (hashAlg: HashAlgorithm, passphrase?: string) =>
@@ -152,6 +153,15 @@ describe("HashManager", () => {
     });
 
     describe("HashManager availability", () => {
+        it("shares one WebAssembly instance between XXHash managers", async () => {
+            const first = generateHashManager(generateSettings(HashAlgorithms.XXHASH64));
+            const second = generateHashManager(generateSettings(HashAlgorithms.XXHASH64));
+
+            await Promise.all([first.initialise(), second.initialise()]);
+
+            expect((first.manager as XXHashHashManager).xxhash).toBe((second.manager as XXHashHashManager).xxhash);
+        });
+
         it("all hash algorithms should be available", () => {
             for (const hashAlg of Object.values(HashAlgorithms)) {
                 expect(HashManager.isAvailableFor(hashAlg)).toBe(true);
