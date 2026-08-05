@@ -202,12 +202,12 @@ export class LiveSyncCouchDBReplicator extends LiveSyncAbstractReplicator {
         return Promise.resolve(true);
     }
 
-    terminateSync() {
-        if (!this.controller) {
-            return;
+    terminateSync(controller = this.controller) {
+        if (!controller) return;
+        controller.abort();
+        if (this.controller === controller) {
+            this.controller = undefined;
         }
-        this.controller.abort();
-        this.controller = undefined;
     }
 
     async openReplication(
@@ -271,22 +271,22 @@ export class LiveSyncCouchDBReplicator extends LiveSyncAbstractReplicator {
             //
         }
     }
-    replicationCompleted(showResult: boolean) {
+    replicationCompleted(showResult: boolean, controller?: AbortController) {
         this.syncStatus = "COMPLETED";
         this.updateInfo();
         Logger("Replication completed", showResult ? LOG_LEVEL_NOTICE : LOG_LEVEL_INFO, showResult ? "sync" : "");
-        this.terminateSync();
+        this.terminateSync(controller);
     }
-    replicationDenied(e: unknown) {
+    replicationDenied(e: unknown, controller?: AbortController) {
         this.syncStatus = "ERRORED";
         this.updateInfo();
-        this.terminateSync();
+        this.terminateSync(controller);
         Logger("Replication denied", LOG_LEVEL_NOTICE, "sync");
         Logger(e, LOG_LEVEL_VERBOSE);
     }
-    replicationErrored(e: unknown) {
+    replicationErrored(e: unknown, controller?: AbortController) {
         this.syncStatus = "ERRORED";
-        this.terminateSync();
+        this.terminateSync(controller);
         this.updateInfo();
         Logger("Replication error", LOG_LEVEL_NOTICE, "sync");
         Logger(e, LOG_LEVEL_VERBOSE);
@@ -360,16 +360,16 @@ export class LiveSyncCouchDBReplicator extends LiveSyncAbstractReplicator {
                         }
                         break;
                     case "complete":
-                        this.replicationCompleted(showResult);
+                        this.replicationCompleted(showResult, controller);
                         return "DONE";
                     case "active":
                         this.replicationActivated(showResult);
                         break;
                     case "denied":
-                        this.replicationDenied(e);
+                        this.replicationDenied(e, controller);
                         return "FAILED";
                     case "error":
-                        this.replicationErrored(e);
+                        this.replicationErrored(e, controller);
                         Logger("Replication stopped.", showResult ? LOG_LEVEL_NOTICE : LOG_LEVEL_INFO, "sync");
                         if (this.env.services.remote.hadLastPostFailedBySize) {
                             if (e && (e as { status?: number }).status == 413) {
@@ -404,8 +404,7 @@ export class LiveSyncCouchDBReplicator extends LiveSyncAbstractReplicator {
             Logger(ex, LOG_LEVEL_VERBOSE);
             return "FAILED";
         } finally {
-            this.terminateSync();
-            this.controller = undefined;
+            this.terminateSync(controller);
         }
     }
 
@@ -665,7 +664,9 @@ export class LiveSyncCouchDBReplicator extends LiveSyncAbstractReplicator {
         if ((await this.ensurePBKDF2Salt(setting, showResult, !retrying)) === false) {
             return false;
         }
+        let executed = false;
         const next = await shareRunningResult("oneShotReplication", async () => {
+            executed = true;
             if (this.controller) {
                 Logger(
                     $msg("liveSyncReplicator.replicationInProgress"),
@@ -764,6 +765,12 @@ export class LiveSyncCouchDBReplicator extends LiveSyncAbstractReplicator {
             }
             return false;
         });
+        if (!executed) {
+            // This request joined an older one-shot task, which may have used a
+            // different direction. Run the requested mode after that task has
+            // settled instead of treating its result as our own.
+            return await this.openOneShotReplication(setting, showResult, retrying, syncMode, ignoreCleanLock);
+        }
         if (typeof next === "boolean") {
             return next;
         }
@@ -881,9 +888,12 @@ export class LiveSyncCouchDBReplicator extends LiveSyncAbstractReplicator {
     async openContinuousReplication(
         setting: RemoteDBSettings,
         showResult: boolean,
-        retrying: boolean
+        retrying: boolean,
+        syncMode: "sync" | "pullOnly" = "sync"
     ): Promise<boolean> {
+        let executed = false;
         const next = await shareRunningResult("continuousReplication", async () => {
+            executed = true;
             if (this.controller) {
                 Logger(
                     $msg("liveSyncReplicator.replicationInProgress"),
@@ -922,10 +932,26 @@ export class LiveSyncCouchDBReplicator extends LiveSyncAbstractReplicator {
                     this.originalSetting = setting;
                 }
                 this.terminateSync();
-                const syncHandler = localDB.sync<EntryDoc>(db, {
-                    ...syncOption,
-                });
-                const syncMode = "sync";
+                const { pull: _pull, push: _push, ...replicationOption } = syncOption;
+                const syncHandler =
+                    syncMode == "pullOnly"
+                        ? localDB.replicate.from<EntryDoc>(db, {
+                              ...replicationOption,
+                              // Keep the headless long-poll bounded. Some
+                              // reverse-proxy paths remain connected without
+                              // waking Node's CouchDB client for new changes.
+                              heartbeat: false,
+                              timeout: 500,
+                              // A selector-backed CouchDB _changes feed can
+                              // advance its sequence without delivering later
+                              // matching revisions in continuous mode. The
+                              // headless inbound channel therefore receives
+                              // chunks as well as note metadata; one-shot pulls
+                              // still honour readChunksOnline.
+                          })
+                        : localDB.sync<EntryDoc>(db, {
+                              ...syncOption,
+                          });
                 const syncResult = await this.processSync(
                     syncHandler,
                     showResult,
@@ -943,7 +969,8 @@ export class LiveSyncCouchDBReplicator extends LiveSyncAbstractReplicator {
                 }
                 if (syncResult == "NEED_RESURRECT") {
                     this.terminateSync();
-                    return async () => await this.openContinuousReplication(this.originalSetting, showResult, false);
+                    return async () =>
+                        await this.openContinuousReplication(this.originalSetting, showResult, false, syncMode);
                 }
                 if (syncResult == "NEED_RETRY") {
                     const tempSetting: RemoteDBSettings = JSON.parse(JSON.stringify(setting));
@@ -963,16 +990,26 @@ export class LiveSyncCouchDBReplicator extends LiveSyncAbstractReplicator {
                             }),
                             showResult ? LOG_LEVEL_NOTICE : LOG_LEVEL_INFO
                         );
-                        return async () => await this.openContinuousReplication(tempSetting, showResult, true);
+                        return async () =>
+                            await this.openContinuousReplication(tempSetting, showResult, true, syncMode);
                     }
                 }
             }
             return false;
         });
+        if (!executed) {
+            // A new LiveSync start requested while an older continuous task was
+            // closing must start a fresh task after the older one settles.
+            return await this.openContinuousReplication(setting, showResult, retrying, syncMode);
+        }
         if (typeof next === "boolean") {
             return next;
         }
         return await next();
+    }
+
+    openContinuousPullReplication(setting: RemoteDBSettings, showResult: boolean): Promise<boolean> {
+        return this.openContinuousReplication(setting, showResult, false, "pullOnly");
     }
 
     closeReplication() {
